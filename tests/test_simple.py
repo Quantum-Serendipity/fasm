@@ -96,6 +96,29 @@ class TestFasm(unittest.TestCase):
                 result = list(parser.parse_fasm_filename(example('many.fasm')))
                 check_round_trip(self, parser, result)
 
+    def test_wide_decimal_values(self):
+        cases = [
+            ('A.X[63:0] = 64\'d4294967296', 4294967296),
+            ('A.X[63:0] = 64\'d18446744073709551615', 2**64 - 1),
+            ('A.X[95:0] = \'d18_446_744_073_709_551_616', 2**64),
+            ('A.X[31:0] = 4294967295', 2**32 - 1),
+        ]
+        for name, parser in parsers.items():
+            for text, value in cases:
+                with self.subTest(name, parser=name, text=text):
+                    result = list(parser.parse_fasm_string(text))
+                    self.assertEqual(result[0].set_feature.value, value)
+                    check_round_trip(self, parser, result)
+        for text, _ in cases:
+            with self.subTest(text=text):
+                self.assertEqual(
+                    list(parsers['antlr'].parse_fasm_string(text)),
+                    list(parsers['textx'].parse_fasm_string(text)))
+
+    def test_plain_decimal_above_one_word_refused(self):
+        with self.assertRaises(Exception):
+            parsers['antlr'].parse_fasm_string('A.X[63:0] = 4294967296')
+
     def test_implementations(self):
         self.assertTrue('antlr' in fasm.parser.available)
         self.assertTrue('textx' in fasm.parser.available)

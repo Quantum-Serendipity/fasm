@@ -197,6 +197,25 @@ struct ParseException {
         std::string message;  ///< A descriptive message.
 };
 
+uint32_t to_num(antlr4::tree::TerminalNode* node) {
+        std::string text = node->getText();
+        unsigned long long value = 0;
+        size_t used = 0;
+        try {
+                value = std::stoull(text, &used);
+        } catch (...) {
+                used = 0;
+        }
+        if (used != text.size() ||
+            value > std::numeric_limits<uint32_t>::max()) {
+                throw ParseException{
+                    .line = node->getSymbol()->getLine(),
+                    .position = node->getSymbol()->getCharPositionInLine(),
+                    .message = "Could not decode decimal number."};
+        }
+        return uint32_t(value);
+}
+
 /// Helper macro to convert a rule context into a string
 /// For use inside FasmParserBaseVisitor
 #define GET(x) (context->x() ? visit(context->x()).as<std::string>() : "")
@@ -265,10 +284,10 @@ class FasmParserBaseVisitor : public FasmParserVisitor {
         virtual Any visitFeatureAddress(
             FasmParser::FeatureAddressContext* context) override {
                 std::ostringstream data;
-                data << Num(std::stoul(context->INT(0)->getText()));
+                data << Num(to_num(context->INT(0)));
 
                 if (context->INT(1)) {
-                        data << Num(std::stoul(context->INT(1)->getText()));
+                        data << Num(to_num(context->INT(1)));
                 }
                 return withHeader(TAG(':', address), data.str());
         }
@@ -281,9 +300,8 @@ class FasmParserBaseVisitor : public FasmParserVisitor {
                 std::ostringstream data;
                 if (context->verilogDigits()) {
                         if (context->INT()) {
-                                data << Num(
-                                    TAG('\'', width),
-                                    std::stoi(context->INT()->getText()));
+                                data << Num(TAG('\'', width),
+                                            to_num(context->INT()));
                         }
                         data << visit(context->verilogDigits())
                                     .as<std::string>();
@@ -296,15 +314,7 @@ class FasmParserBaseVisitor : public FasmParserVisitor {
         virtual Any visitPlainDecimal(
             FasmParser::PlainDecimalContext* context) override {
                 std::ostringstream data;
-                try {
-                        data << Num(TAG('p', plain),
-                                    std::stoi(context->INT()->getText()));
-                } catch (...) {
-                        throw ParseException{
-                            .line = context->start->getLine(),
-                            .position = context->start->getCharPositionInLine(),
-                            .message = "Could not decode decimal number."};
-                }
+                data << Num(TAG('p', plain), to_num(context->INT()));
                 return data.str();
         }
 
@@ -368,36 +378,32 @@ class FasmParserBaseVisitor : public FasmParserVisitor {
         /// Tags: decimal (d)
         virtual Any visitDecimalValue(
             FasmParser::DecimalValueContext* context) override {
-                long long unsigned integer = 0;
+                std::vector<uint32_t> words(1, 0);
                 std::string value = context->DECIMAL_VALUE()->getText();
                 auto it = value.begin();
                 it += 2;  /// skip 'd
 
-                /// Build up a Num, skipping '_'.
                 while (it != value.end()) {
                         if (*it != '_') {
-                                int digit_value = *it - '0';
-                                // Check for overflow
-                                if (integer > (std::numeric_limits<
-                                                   long long unsigned>::max() -
-                                               digit_value) /
-                                                  10) {
-                                        throw ParseException{
-                                            .line = context->start->getLine(),
-                                            .position =
-                                                context->start
-                                                    ->getCharPositionInLine(),
-                                            .message =
-                                                "Could not decode decimal "
-                                                "number."};
+                                uint64_t carry = *it - '0';
+                                for (auto& word : words) {
+                                        uint64_t acc =
+                                            uint64_t(word) * 10 + carry;
+                                        word = uint32_t(acc);
+                                        carry = acc >> Num::kWidth;
                                 }
-                                integer = (integer * 10) + digit_value;
+                                if (carry) {
+                                        words.push_back(uint32_t(carry));
+                                }
                         }
                         it++;
                 }
 
                 std::ostringstream data;
-                data << Num(integer);
+                for (auto word = words.rbegin(); word != words.rend();
+                     word++) {
+                        data << Num(*word);
+                }
                 return withHeader(TAG('d', decimal), data.str());
         }
 

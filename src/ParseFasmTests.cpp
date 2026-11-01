@@ -74,3 +74,38 @@ TEST(ParseFasmTests, parse_fasm) {
      hex_mode = stored_hex_mode;
 }
 // clang-format on
+
+static std::string parse_hex(const std::string& fasm) {
+        std::istringstream input(fasm);
+        std::ostringstream output;
+        bool stored_hex_mode = hex_mode;
+        hex_mode = true;
+        try {
+                parse_fasm(input, output);
+        } catch (...) {
+                hex_mode = stored_hex_mode;
+                throw;
+        }
+        hex_mode = stored_hex_mode;
+        return output.str();
+}
+
+TEST(ParseFasmTests, wide_decimal) {
+        EXPECT_EQ(parse_hex("a[63:0] = 64'd4294967296"),
+                  "l<24>s<1f>f<1>a:<7><3f><0>'<40>d<6><1><0>\n");
+        EXPECT_EQ(parse_hex("a[63:0] = 64'd18446744073709551615"),
+                  "l<33>s<2e>f<1>a:<7><3f><0>'<40>"
+                  "d<14><ffffffff><ffffffff>\n");
+        EXPECT_EQ(parse_hex("a[95:0] = 'd18_446_744_073_709_551_616"),
+                  "l<22>s<1d>f<1>a:<7><5f><0>d<9><1><0><0>\n");
+        EXPECT_EQ(parse_hex("a[31:0] = 'd0"),
+                  "l<1c>s<17>f<1>a:<7><1f><0>d<3><0>\n");
+}
+
+TEST(ParseFasmTests, narrow_decimal_fields) {
+        EXPECT_EQ(parse_hex("a[31:0] = 4294967295"),
+                  "l<20>s<1b>f<1>a:<7><1f><0>p<ffffffff>\n");
+        EXPECT_THROW(parse_hex("a[63:0] = 4294967296"), ParseException);
+        EXPECT_THROW(parse_hex("a[4294967296] = 1"), ParseException);
+        EXPECT_THROW(parse_hex("a[63:0] = 4294967296'd1"), ParseException);
+}
