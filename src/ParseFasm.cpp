@@ -151,40 +151,33 @@ std::string withHeader(char tag, std::string data) {
         return header.str() + data;
 }
 
-/// Counts characters that don't match the given character.
-/// Used to count digits skipping '_'.
-int count_without(std::string::iterator start,
-                  std::string::iterator end,
-                  char c) {
-        int count = 0;
-        auto it = start;
-        while (it != end) {
-                if (*it != c) {
-                        count++;
-                }
-                it++;
-        }
-        return count;
-}
-
-/// Calculates the number of leading pad bits are needed
-/// so that the rightmost bit will be the LSB of a Num.
-/// e.g. This would be 31 for 33'b0.
-int lead_bits(int bits) {
-        return (Num::kWidth - (bits % Num::kWidth)) % Num::kWidth;
+bool is_digit_separator(char c) {
+        return c == '_' || c == ' ' || c == '\t';
 }
 
 // clang-format off
-/// Decode a hex digit.
-int from_hex_digit(char c) {
-    int result =
+int from_digit(char c) {
+    return
         c >= '0' && c <= '9' ? c - '0' :
         c >= 'a' && c <= 'f' ? c - 'a' + 10 :
         c >= 'A' && c <= 'F' ? c - 'A' + 10: -1;
-    assert(result >= 0 && result < 16);
-    return result;
 }
 // clang-format on
+
+size_t bit_length(const std::vector<uint32_t>& words) {
+        for (size_t i = words.size(); i > 0; i--) {
+                uint32_t word = words[i - 1];
+                if (word) {
+                        size_t bits = (i - 1) * Num::kWidth;
+                        while (word) {
+                                bits++;
+                                word >>= 1;
+                        }
+                        return bits;
+                }
+        }
+        return 0;
+}
 
 /// Makes tags easy to extract for documentation and code generation.
 /// Use at most once per line to allow simple grepping.
@@ -196,6 +189,53 @@ struct ParseException {
         size_t position;      ///< Position in that line.
         std::string message;  ///< A descriptive message.
 };
+
+ParseException parse_error(antlr4::Token* token, const std::string& message) {
+        return ParseException{.line = token->getLine(),
+                              .position = token->getCharPositionInLine(),
+                              .message = message};
+}
+
+ParseException parse_error(antlr4::tree::TerminalNode* node,
+                           const std::string& message) {
+        return parse_error(node->getSymbol(), message);
+}
+
+std::vector<uint32_t> verilog_words(antlr4::tree::TerminalNode* node,
+                                    unsigned radix,
+                                    size_t bits_per_digit) {
+        std::string text = node->getText();
+        std::vector<uint32_t> words(1, 0);
+        size_t digits = 0;
+        for (auto it = text.begin() + 2; it != text.end(); it++) {
+                if (is_digit_separator(*it)) {
+                        continue;
+                }
+                int digit = from_digit(*it);
+                if (digit < 0 || unsigned(digit) >= radix) {
+                        throw parse_error(node, "Invalid digit in value.");
+                }
+                digits++;
+                uint64_t carry = unsigned(digit);
+                for (auto& word : words) {
+                        uint64_t acc = uint64_t(word) * radix + carry;
+                        word = uint32_t(acc);
+                        carry = acc >> Num::kWidth;
+                }
+                if (carry) {
+                        words.push_back(uint32_t(carry));
+                }
+        }
+        if (digits == 0) {
+                throw parse_error(node, "Value has no digits.");
+        }
+        size_t padded =
+            (digits * bits_per_digit + Num::kWidth - 1) / Num::kWidth;
+        while (words.size() < padded) {
+                words.push_back(0);
+        }
+        return words;
+}
 
 uint32_t to_num(antlr4::tree::TerminalNode* node) {
         std::string text = node->getText();
@@ -273,9 +313,14 @@ class FasmParserBaseVisitor : public FasmParserVisitor {
         /// Tag: set feature (s)
         virtual Any visitSetFasmFeature(
             FasmParser::SetFasmFeatureContext* context) override {
+                declared_width = -1;
+                value_bits = 0;
                 std::ostringstream data;
                 data << Str(TAG('f', feature), context->FEATURE()->getText())
                      << GET(featureAddress) << GET(value);
+                if (context->value()) {
+                        check_value_width(context);
+                }
                 return withHeader(TAG('s', set_feature), data.str());
         }
 
@@ -300,8 +345,9 @@ class FasmParserBaseVisitor : public FasmParserVisitor {
                 std::ostringstream data;
                 if (context->verilogDigits()) {
                         if (context->INT()) {
-                                data << Num(TAG('\'', width),
-                                            to_num(context->INT()));
+                                uint32_t width = to_num(context->INT());
+                                declared_width = width;
+                                data << Num(TAG('\'', width), width);
                         }
                         data << visit(context->verilogDigits())
                                     .as<std::string>();
@@ -314,7 +360,9 @@ class FasmParserBaseVisitor : public FasmParserVisitor {
         virtual Any visitPlainDecimal(
             FasmParser::PlainDecimalContext* context) override {
                 std::ostringstream data;
-                data << Num(TAG('p', plain), to_num(context->INT()));
+                uint32_t value = to_num(context->INT());
+                value_bits = bit_length({value});
+                data << Num(TAG('p', plain), value);
                 return data.str();
         }
 
@@ -322,121 +370,33 @@ class FasmParserBaseVisitor : public FasmParserVisitor {
         /// Tag: hex (h)
         virtual Any visitHexValue(
             FasmParser::HexValueContext* context) override {
-                std::ostringstream data;
-                std::string value = context->HEXADECIMAL_VALUE()->getText();
-                auto it = value.begin();
-                it += 2;  /// skip 'h
-
-                /// Build up Nums 4 bits at a time, skipping '_'.
-                int bits = lead_bits(count_without(it, value.end(), '_') * 4);
-                uint32_t word = 0;
-                while (it != value.end()) {
-                        if (*it != '_') {
-                                word = (word << 4) | from_hex_digit(*it);
-                                bits += 4;
-                                if (bits == Num::kWidth) {
-                                        data << Num(word);
-                                        word = 0;
-                                        bits = 0;
-                                }
-                        }
-                        it++;
-                }
-                assert(!word);
-                return withHeader(TAG('h', hex), data.str());
+                return encode(
+                    TAG('h', hex),
+                    verilog_words(context->HEXADECIMAL_VALUE(), 16, 4));
         }
 
         /// A Verilog binary value.
         /// Tag: binary (b)
         virtual Any visitBinaryValue(
             FasmParser::BinaryValueContext* context) override {
-                std::ostringstream data;
-                std::string value = context->BINARY_VALUE()->getText();
-                auto it = value.begin();
-                it += 2;  /// skip 'b
-
-                /// Build up Nums a bit at a time, skipping '_'.
-                int bits = lead_bits(count_without(it, value.end(), '_'));
-                uint32_t word = 0;
-                while (it != value.end()) {
-                        if (*it != '_') {
-                                word = (word << 1) | (*it == '1' ? 1 : 0);
-                                bits += 1;
-                                if (bits == Num::kWidth) {
-                                        data << Num(word);
-                                        word = 0;
-                                        bits = 0;
-                                }
-                        }
-                        it++;
-                }
-                assert(!word);
-                return withHeader(TAG('b', binary), data.str());
+                return encode(TAG('b', binary),
+                              verilog_words(context->BINARY_VALUE(), 2, 1));
         }
 
         /// A Verilog decimal value.
         /// Tags: decimal (d)
         virtual Any visitDecimalValue(
             FasmParser::DecimalValueContext* context) override {
-                std::vector<uint32_t> words(1, 0);
-                std::string value = context->DECIMAL_VALUE()->getText();
-                auto it = value.begin();
-                it += 2;  /// skip 'd
-
-                while (it != value.end()) {
-                        if (*it != '_') {
-                                uint64_t carry = *it - '0';
-                                for (auto& word : words) {
-                                        uint64_t acc =
-                                            uint64_t(word) * 10 + carry;
-                                        word = uint32_t(acc);
-                                        carry = acc >> Num::kWidth;
-                                }
-                                if (carry) {
-                                        words.push_back(uint32_t(carry));
-                                }
-                        }
-                        it++;
-                }
-
-                std::ostringstream data;
-                for (auto word = words.rbegin(); word != words.rend();
-                     word++) {
-                        data << Num(*word);
-                }
-                return withHeader(TAG('d', decimal), data.str());
+                return encode(TAG('d', decimal),
+                              verilog_words(context->DECIMAL_VALUE(), 10, 0));
         }
 
         /// A Verilog octal value.
         /// Tags: octal (o)
         virtual Any visitOctalValue(
             FasmParser::OctalValueContext* context) override {
-                std::ostringstream data;
-                std::string value = context->OCTAL_VALUE()->getText();
-                auto it = value.begin();
-                it += 2;  /// skip 'b
-
-                /// Build up a Num 3 bits at a time.
-                /// Note that since the word size is not evenly divisible by 3,
-                /// intermediate values can be greater than the word size.
-                /// This is why the 'word' below is 64 bits wide.
-                int bits = lead_bits(count_without(it, value.end(), '_') * 3);
-                uint64_t word = 0;  /// could temporarily overflow uint32_t
-                while (it != value.end()) {
-                        if (*it != '_') {
-                                word = (word << 3) | (*it - '0');
-                                bits += 3;
-                                if (bits >= Num::kWidth) {
-                                        data << Num(word >>
-                                                    (bits - Num::kWidth));
-                                        word >>= Num::kWidth;
-                                        bits -= Num::kWidth;
-                                }
-                        }
-                        it++;
-                }
-                assert(!word);
-                return withHeader(TAG('o', octal), data.str());
+                return encode(TAG('o', octal),
+                              verilog_words(context->OCTAL_VALUE(), 8, 3));
         }
 
         /// A collection of annotations. { ... }
@@ -468,7 +428,56 @@ class FasmParserBaseVisitor : public FasmParserVisitor {
         }
 
        private:
+        std::string encode(char tag, const std::vector<uint32_t>& words) {
+                value_bits = bit_length(words);
+                std::ostringstream data;
+                for (auto word = words.rbegin(); word != words.rend(); word++) {
+                        data << Num(*word);
+                }
+                return withHeader(tag, data.str());
+        }
+
+        void check_value_width(FasmParser::SetFasmFeatureContext* context) {
+                antlr4::Token* where = context->value()->getStart();
+                int64_t address_width = 1;
+                if (auto* address = context->featureAddress()) {
+                        if (address->INT(1)) {
+                                address_width =
+                                    int64_t(to_num(address->INT(0))) -
+                                    int64_t(to_num(address->INT(1))) + 1;
+                        }
+                }
+                if (declared_width >= 0) {
+                        if (int64_t(value_bits) > declared_width) {
+                                throw parse_error(
+                                    where,
+                                    "Value is wider than its declared width "
+                                    "of " +
+                                        std::to_string(declared_width) +
+                                        " bits.");
+                        }
+                        if (declared_width > address_width) {
+                                throw parse_error(
+                                    where,
+                                    "Declared width of " +
+                                        std::to_string(declared_width) +
+                                        " bits exceeds the address width "
+                                        "of " +
+                                        std::to_string(address_width) +
+                                        " bits.");
+                        }
+                }
+                if (int64_t(value_bits) > std::max<int64_t>(address_width, 0)) {
+                        throw parse_error(
+                            where, "Value is wider than the address width of " +
+                                       std::to_string(address_width) +
+                                       " bits.");
+                }
+        }
+
         std::ostream& out;
+        int64_t declared_width = -1;
+        size_t value_bits = 0;
 };
 
 // Prevent use of the GET macro outside FasmParseBaseVisitor

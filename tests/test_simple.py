@@ -119,6 +119,60 @@ class TestFasm(unittest.TestCase):
         with self.assertRaises(Exception):
             parsers['antlr'].parse_fasm_string('A.X[63:0] = 4294967296')
 
+    def test_value_digit_separators(self):
+        cases = [
+            ('A.X[127:0] = \'d 5', 5),
+            ('A.X[127:0] = 128\'d 5', 5),
+            ('A.X[127:0] = \'d\t1_0', 10),
+            ('A.X[63:0] = 64\'h 5', 5),
+            ('A.X[127:0] = \'h\t5', 5),
+            ('A.X[127:0] = \'b 101', 5),
+            ('A.X[127:0] = \'o 17', 15),
+            ('A.X[127:0] = \'o\t17', 15),
+            ('A.X[63:0] = \'o777777777777', 2**36 - 1),
+            ('A.X[63:0] = \'o1234567012345670', 0o1234567012345670),
+            ('A.X[7:0] = 8\'d255', 255),
+            ('A.X[0:7] = 0', 0),
+        ]
+        for text, value in cases:
+            with self.subTest(text=text):
+                got = {
+                    name: list(parser.parse_fasm_string(text))
+                    for name, parser in parsers.items()
+                }
+                self.assertEqual(got['antlr'], got['textx'])
+                self.assertEqual(got['antlr'][0].set_feature.value, value)
+
+    def test_values_refused_by_both(self):
+        cases = [
+            'A.X[7:0] = \'d_',
+            'A.X[7:0] = \'h_',
+            'A.X[7:0] = \'b_',
+            'A.X[7:0] = \'o _',
+            'A.X[7:0] = 16\'d1',
+            'A = 2\'d1',
+            'A.X[0:7] = 1\'d0',
+            'A.X[7:0] = 2\'d6',
+            'A.X[3:0] = \'d16',
+            'A.X[3:0] = 16',
+        ]
+        for text in cases:
+            for name, parser in parsers.items():
+                with self.subTest(name, parser=name, text=text):
+                    with self.assertRaises(Exception):
+                        list(parser.parse_fasm_string(text))
+
+    def test_oversize_value_message(self):
+        with self.assertRaisesRegex(
+                Exception, 'wider than its declared width of 2 bits'):
+            parsers['antlr'].parse_fasm_string('A.X[7:0] = 2\'d6')
+        with self.assertRaisesRegex(
+                Exception, 'wider than the address width of 4 bits'):
+            parsers['antlr'].parse_fasm_string('A.X[3:0] = \'d16')
+        with self.assertRaisesRegex(
+                Exception, 'exceeds the address width of 8 bits'):
+            parsers['antlr'].parse_fasm_string('A.X[7:0] = 16\'d1')
+
     def test_implementations(self):
         self.assertTrue('antlr' in fasm.parser.available)
         self.assertTrue('textx' in fasm.parser.available)

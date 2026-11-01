@@ -32,10 +32,12 @@ TEST(ParseFasmTests, Num) {
         }
 }
 
-// Check that count_without() works
-TEST(ParseFasmTests, count_without) {
-        std::string str = "_01_2_34_";
-        EXPECT_EQ(count_without(str.begin(), str.end(), '_'), 5);
+TEST(ParseFasmTests, bit_length) {
+        EXPECT_EQ(bit_length({0}), 0u);
+        EXPECT_EQ(bit_length({1}), 1u);
+        EXPECT_EQ(bit_length({0xffffffff}), 32u);
+        EXPECT_EQ(bit_length({0, 1}), 33u);
+        EXPECT_EQ(bit_length({5, 0, 0}), 3u);
 }
 
 // clang-format off
@@ -108,4 +110,59 @@ TEST(ParseFasmTests, narrow_decimal_fields) {
         EXPECT_THROW(parse_hex("a[63:0] = 4294967296"), ParseException);
         EXPECT_THROW(parse_hex("a[4294967296] = 1"), ParseException);
         EXPECT_THROW(parse_hex("a[63:0] = 4294967296'd1"), ParseException);
+}
+
+static std::string parse_error_message(const std::string& fasm) {
+        try {
+                parse_hex(fasm);
+        } catch (const ParseException& e) {
+                return e.message;
+        }
+        return "";
+}
+
+TEST(ParseFasmTests, value_digit_separators) {
+        EXPECT_EQ(parse_hex("a[127:0] = 'd 5"),
+                  "l<1c>s<17>f<1>a:<7><7f><0>d<3><5>\n");
+        EXPECT_EQ(parse_hex("a[127:0] = 128'd 5"),
+                  parse_hex("a[127:0] = 128'd5"));
+        EXPECT_EQ(parse_hex("a[127:0] = 'd\t1_0"),
+                  parse_hex("a[127:0] = 'd10"));
+        EXPECT_EQ(parse_hex("a[63:0] = 64'h 5"), parse_hex("a[63:0] = 64'h5"));
+        EXPECT_EQ(parse_hex("a[127:0] = 'h\t5"), parse_hex("a[127:0] = 'h5"));
+        EXPECT_EQ(parse_hex("a[127:0] = 'b 101"),
+                  parse_hex("a[127:0] = 'b101"));
+        EXPECT_EQ(parse_hex("a[127:0] = 'b\t1"), parse_hex("a[127:0] = 'b1"));
+        EXPECT_EQ(parse_hex("a[127:0] = 'o 17"), parse_hex("a[127:0] = 'o17"));
+        EXPECT_EQ(parse_hex("a[127:0] = 'o\t17"), parse_hex("a[127:0] = 'o17"));
+}
+
+TEST(ParseFasmTests, multi_word_octal) {
+        EXPECT_EQ(parse_hex("a[63:0] = 'o777777777777"),
+                  "l<26>s<21>f<1>a:<7><3f><0>o<d><f><ffffffff>\n");
+}
+
+TEST(ParseFasmTests, value_without_digits) {
+        EXPECT_THROW(parse_hex("a[7:0] = 'd_"), ParseException);
+        EXPECT_THROW(parse_hex("a[7:0] = 'h_"), ParseException);
+        EXPECT_THROW(parse_hex("a[7:0] = 'b_"), ParseException);
+        EXPECT_THROW(parse_hex("a[7:0] = 'o _"), ParseException);
+        EXPECT_EQ(parse_error_message("a[7:0] = 'd_"), "Value has no digits.");
+}
+
+TEST(ParseFasmTests, value_widths) {
+        EXPECT_EQ(parse_hex("a[7:0] = 8'd255"),
+                  "l<20>s<1b>f<1>a:<6><7><0>'<8>d<4><ff>\n");
+        EXPECT_EQ(parse_hex("a[0:7] = 0"), "l<18>s<13>f<1>a:<6><0><7>p<0>\n");
+        EXPECT_EQ(parse_error_message("a[7:0] = 16'd1"),
+                  "Declared width of 16 bits exceeds the address width of 8 "
+                  "bits.");
+        EXPECT_THROW(parse_hex("a = 2'd1"), ParseException);
+        EXPECT_THROW(parse_hex("a[0:7] = 1'd0"), ParseException);
+        EXPECT_EQ(parse_error_message("a[7:0] = 2'd6"),
+                  "Value is wider than its declared width of 2 bits.");
+        EXPECT_EQ(parse_error_message("a[3:0] = 'd16"),
+                  "Value is wider than the address width of 4 bits.");
+        EXPECT_THROW(parse_hex("a[3:0] = 16"), ParseException);
+        EXPECT_THROW(parse_hex("a[0:7] = 1"), ParseException);
 }

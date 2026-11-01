@@ -58,10 +58,14 @@ def parse_fasm_string(s):
     # Use a closure to parse while allowing C++ to handle memory.
     @CFUNCTYPE(None, POINTER(c_char), c_size_t)
     def callback(s, n):
-        data = s[:n]
-        assert len(data) == n
-        result[0] = antlr_to_tuple.parse_fasm_data(data)
-        error[0] = None
+        try:
+            data = s[:n]
+            assert len(data) == n
+            result[0] = antlr_to_tuple.parse_fasm_data(data)
+            error[0] = None
+        except Exception as e:
+            result[0] = None
+            error[0] = e
 
     @CFUNCTYPE(None, c_size_t, c_size_t, c_char_p)
     def error_callback(line, position, message):
@@ -97,10 +101,14 @@ def parse_fasm_filename(filename):
     # Use a closure to parse while allowing C++ to handle memory.
     @CFUNCTYPE(None, POINTER(c_char), c_size_t)
     def callback(s, n):
-        data = s[:n]
-        assert len(data) == n
-        result[0] = antlr_to_tuple.parse_fasm_data(data)
-        error[0] = None
+        try:
+            data = s[:n]
+            assert len(data) == n
+            result[0] = antlr_to_tuple.parse_fasm_data(data)
+            error[0] = None
+        except Exception as e:
+            result[0] = None
+            error[0] = e
 
     @CFUNCTYPE(None, c_size_t, c_size_t, c_char_p)
     def error_callback(line, position, message):
